@@ -72,33 +72,53 @@ class Abandoned_Carts_List_Table extends WP_List_Table
         $current_page = $this->get_pagenum(); // Get the current page number
         $offset = ($current_page - 1) * $per_page; // Calculate the offset
 
-        // Get sorting parameters
-        $orderby = (isset($_GET['orderby']) && in_array($_GET['orderby'], array_keys($this->get_sortable_columns()))) ? sanitize_sql_orderby($_GET['orderby']) : 'checkout_time';
-        $order = (isset($_GET['order']) && in_array($_GET['order'], array('asc', 'desc'))) ? sanitize_sql_orderby($_GET['order']) : 'desc';
+        // Get sorting parameters with proper validation
+        $allowed_orderby = array_keys($this->get_sortable_columns());
+        $orderby = (isset($_GET['orderby']) && in_array($_GET['orderby'], $allowed_orderby)) ? sanitize_key($_GET['orderby']) : 'checkout_time';
+        $order = (isset($_GET['order']) && in_array(strtolower($_GET['order']), array('asc', 'desc'))) ? strtoupper(sanitize_key($_GET['order'])) : 'DESC';
 
-        // Build search query
+        // Build search query with proper escaping
         $search_query = '';
+        $search_params = array();
         if (isset($_GET['s']) && !empty($_GET['s'])) {
             $search_term = sanitize_text_field($_GET['s']);
             // Search in customer_data or cart_contents fields
-            $search_query = $wpdb->prepare(" AND (customer_data LIKE %s OR cart_contents LIKE %s)", '%' . $wpdb->esc_like($search_term) . '%', '%' . $wpdb->esc_like($search_term) . '%');
+            $search_query = " AND (customer_data LIKE %s OR cart_contents LIKE %s)";
+            $search_params = array('%' . $wpdb->esc_like($search_term) . '%', '%' . $wpdb->esc_like($search_term) . '%');
         }
 
         // Filter by 'abandoned' status
         $where_clause = "WHERE status = 'abandoned'";
 
-        // Fetch items from the database
-        $this->items = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT * FROM $table_name $where_clause $search_query ORDER BY $orderby $order LIMIT %d OFFSET %d",
-                $per_page,
-                $offset
-            ),
-            ARRAY_A
-        );
+        // Build the complete query with proper parameter binding
+        $query_params = array_merge(array(), $search_params, array($per_page, $offset));
+        
+        // Fetch items from the database with proper SQL construction
+        $sql = "SELECT * FROM $table_name $where_clause $search_query ORDER BY $orderby $order LIMIT %d OFFSET %d";
+        
+        if (!empty($search_params)) {
+            $this->items = $wpdb->get_results(
+                $wpdb->prepare($sql, $query_params),
+                ARRAY_A
+            );
+        } else {
+            $this->items = $wpdb->get_results(
+                $wpdb->prepare(
+                    "SELECT * FROM $table_name $where_clause ORDER BY $orderby $order LIMIT %d OFFSET %d",
+                    $per_page,
+                    $offset
+                ),
+                ARRAY_A
+            );
+        }
 
-        // Get total number of items (for pagination)
-        $total_items = $wpdb->get_var("SELECT COUNT(id) FROM $table_name $where_clause $search_query");
+        // Get total number of items (for pagination) with proper parameter binding
+        if (!empty($search_params)) {
+            $count_sql = "SELECT COUNT(id) FROM $table_name $where_clause $search_query";
+            $total_items = $wpdb->get_var($wpdb->prepare($count_sql, $search_params));
+        } else {
+            $total_items = $wpdb->get_var("SELECT COUNT(id) FROM $table_name $where_clause");
+        }
 
         // Set pagination arguments
         $this->set_pagination_args(array(
@@ -125,10 +145,23 @@ class Abandoned_Carts_List_Table extends WP_List_Table
      */
     protected function column_default($item, $column_name)
     {
-        // Unserialize customer data
-        $customer_data = unserialize($item['customer_data']);
-        // Unserialize cart contents
-        $cart_contents = unserialize($item['cart_contents']);
+        // Safely unserialize customer data with error handling
+        $customer_data = array();
+        if (!empty($item['customer_data'])) {
+            $unserialized_customer = @unserialize($item['customer_data']);
+            if ($unserialized_customer !== false) {
+                $customer_data = $unserialized_customer;
+            }
+        }
+
+        // Safely unserialize cart contents with error handling
+        $cart_contents = array();
+        if (!empty($item['cart_contents'])) {
+            $unserialized_cart = @unserialize($item['cart_contents']);
+            if ($unserialized_cart !== false && is_array($unserialized_cart)) {
+                $cart_contents = $unserialized_cart;
+            }
+        }
 
         // Determine row class based on 'is_viewed' status
         $row_class = (isset($item['is_viewed']) && $item['is_viewed'] == 1) ? 'viewed-cart' : 'unviewed-cart';
@@ -136,52 +169,86 @@ class Abandoned_Carts_List_Table extends WP_List_Table
         switch ($column_name) {
             case 'customer_name':
                 // Display concatenated first and last name of the customer
-                return '<span class="' . esc_attr($row_class) . '">' . esc_html($customer_data['billing_first_name'] . ' ' . $customer_data['billing_last_name']) . '</span>';
+                $first_name = isset($customer_data['billing_first_name']) ? $customer_data['billing_first_name'] : '';
+                $last_name = isset($customer_data['billing_last_name']) ? $customer_data['billing_last_name'] : '';
+                $full_name = trim($first_name . ' ' . $last_name);
+                return '<span class="' . esc_attr($row_class) . '">' . esc_html($full_name ?: __('N/A', 'abandoned-cart-tracker')) . '</span>';
+            
             case 'customer_email':
                 // Display customer's email address
-                return '<span class="' . esc_attr($row_class) . '">' . esc_html($customer_data['billing_email']) . '</span>';
+                $email = isset($customer_data['billing_email']) ? $customer_data['billing_email'] : '';
+                return '<span class="' . esc_attr($row_class) . '">' . esc_html($email ?: __('N/A', 'abandoned-cart-tracker')) . '</span>';
+            
             case 'customer_phone':
                 // Display customer's phone number
-                return '<span class="' . esc_attr($row_class) . '">' . esc_html($customer_data['billing_phone']) . '</span>';
+                $phone = isset($customer_data['billing_phone']) ? $customer_data['billing_phone'] : '';
+                return '<span class="' . esc_attr($row_class) . '">' . esc_html($phone ?: __('N/A', 'abandoned-cart-tracker')) . '</span>';
+            
             case 'products':
                 // Create a list of products in the cart with links
                 $product_list = '<ul class="' . esc_attr($row_class) . '">';
-                if (is_array($cart_contents) && !empty($cart_contents)) {
+                if (!empty($cart_contents) && is_array($cart_contents)) {
                     foreach ($cart_contents as $product) {
-                        $product_name = esc_html($product['product_name']);
-                        $product_url = get_permalink($product['product_id']);
-                        if ($product_url) {
-                            $product_name = '<a href="' . esc_url($product_url) . '" target="_blank">' . $product_name . '</a>';
+                        if (!isset($product['product_name']) || !isset($product['quantity']) || !isset($product['price'])) {
+                            continue; // Skip malformed product data
                         }
+                        
+                        $product_name = esc_html($product['product_name']);
+                        $product_id = isset($product['product_id']) ? intval($product['product_id']) : 0;
+                        
+                        if ($product_id > 0) {
+                            $product_url = get_permalink($product_id);
+                            if ($product_url && $product_url !== false) {
+                                $product_name = '<a href="' . esc_url($product_url) . '" target="_blank">' . $product_name . '</a>';
+                            }
+                        }
+                        
+                        $quantity = intval($product['quantity']);
+                        $price = floatval($product['price']);
+                        $total_price = $price * $quantity;
+                        
                         // Display product name (with link), quantity, and total price for each product
-                        $product_list .= '<li>' . $product_name . ' (x' . esc_html($product['quantity']) . ') - ' . wc_price($product['price'] * $product['quantity']) . '</li>';
+                        $product_list .= '<li>' . $product_name . ' (x' . esc_html($quantity) . ') - ' . wc_price($total_price) . '</li>';
                     }
                 } else {
                     $product_list .= '<li>' . __('No products found', 'abandoned-cart-tracker') . '</li>';
                 }
                 $product_list .= '</ul>';
                 return $product_list;
+            
             case 'checkout_time':
                 // Display checkout time with only the date and relative time
                 $datetime_timestamp = strtotime($item['checkout_time']);
-                $date_only = date(wc_date_format(), $datetime_timestamp); // Format to show only date
-                $relative_time = $this->_format_relative_time($item['checkout_time']); // Use original for relative time calculation
-                return '<span class="' . esc_attr($row_class) . '">' . esc_html($date_only) . '<br><small>(' . $relative_time . ')</small></span>';
+                if ($datetime_timestamp === false) {
+                    return '<span class="' . esc_attr($row_class) . '">' . esc_html__('Invalid date', 'abandoned-cart-tracker') . '</span>';
+                }
+                
+                $date_only = date_i18n(get_option('date_format'), $datetime_timestamp);
+                $relative_time = $this->_format_relative_time($item['checkout_time']);
+                return '<span class="' . esc_attr($row_class) . '">' . esc_html($date_only) . '<br><small>(' . esc_html($relative_time) . ')</small></span>';
+            
             case 'status':
                 // Set text and class based on status
                 $status_text = ($item['status'] === 'abandoned') ? __('Abandoned', 'abandoned-cart-tracker') : __('Completed', 'abandoned-cart-tracker');
                 $status_class = ($item['status'] === 'abandoned') ? 'abandoned-status' : 'completed-status';
                 return '<span class="' . esc_attr($row_class) . ' ' . esc_attr($status_class) . '">' . esc_html($status_text) . '</span>';
+            
             case 'actions':
-                // Create URL for the 'View' button
-                $view_url = admin_url('admin.php?page=abandoned-cart-details&cart_id=' . $item['id']);
+                // Create URL for the 'View' button with proper nonce
+                $cart_id = intval($item['id']);
+                $view_url = wp_nonce_url(
+                    admin_url('admin.php?page=abandoned-cart-details&cart_id=' . $cart_id),
+                    'view_abandoned_cart_' . $cart_id,
+                    'view_nonce'
+                );
                 $actions = array(
                     'view' => sprintf('<a href="%s">%s</a>', esc_url($view_url), __('View', 'abandoned-cart-tracker')),
                 );
                 return $this->row_actions($actions);
+            
             default:
-                // For debugging, print data for other columns
-                return print_r($item, true);
+                // Return empty string for unknown columns instead of debug output
+                return '';
         }
     }
 
@@ -318,11 +385,11 @@ class Abandoned_Carts_List_Table extends WP_List_Table
         $input_id = $input_id . '-search-input';
 
         // Add hidden inputs for sorting parameters to maintain sorting when searching
-        if (!empty($_REQUEST['orderby'])) {
-            echo '<input type="hidden" name="orderby" value="' . esc_attr($_REQUEST['orderby']) . '" />';
+        if (!empty($_REQUEST['orderby']) && in_array($_REQUEST['orderby'], array_keys($this->get_sortable_columns()))) {
+            echo '<input type="hidden" name="orderby" value="' . esc_attr(sanitize_key($_REQUEST['orderby'])) . '" />';
         }
-        if (!empty($_REQUEST['order'])) {
-            echo '<input type="hidden" name="order" value="' . esc_attr($_REQUEST['order']) . '" />';
+        if (!empty($_REQUEST['order']) && in_array(strtolower($_REQUEST['order']), array('asc', 'desc'))) {
+            echo '<input type="hidden" name="order" value="' . esc_attr(sanitize_key($_REQUEST['order'])) . '" />';
         }
         ?>
         <p class="search-box">
